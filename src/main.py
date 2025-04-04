@@ -1,7 +1,3 @@
-import os
-# import tensorflow as tf
-os.system('clear')
-
 import ydf
 import pandas as pd
 import numpy as np
@@ -43,8 +39,30 @@ test = process_df(test)
 
 
 print("Full train dataset shape is {}".format(df.shape))
+templates = ydf.RandomForestLearner.hyperparameter_templates()
 
-model = ydf.GradientBoostedTreesLearner(label="Transported").train(df)
+hyperparams = {
+    "baseline": {
+        "num_trees": 1000,
+        "max_depth": 25,
+        "min_examples": 3,
+        "categorical_algorithm": "CART",
+        "growing_strategy": "BEST_FIRST_GLOBAL"
+    },
+    "template": templates["benchmark_rank1v1"]
+}
+
+modelT = ydf.RandomForestLearner(label="Transported", **hyperparams["baseline"]).train(df)
+modelT.describe()
+modelT.predict(test)
+
+
+evaluationT = modelT.evaluate(df)
+
+# Query individual evaluation metrics
+print(f"test accuracy: {evaluationT.accuracy}")
+
+model = ydf.RandomForestLearner(label="Transported", **hyperparams["template"]).train(df)
 model.describe()
 model.predict(test)
 
@@ -53,6 +71,4 @@ evaluation = model.evaluate(df)
 # Query individual evaluation metrics
 print(f"test accuracy: {evaluation.accuracy}")
 
-# Show the full evaluation report
-print("Full evaluation report:")
-evaluation
+ 
