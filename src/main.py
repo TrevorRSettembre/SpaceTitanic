@@ -1,7 +1,9 @@
 import ydf
 import pandas as pd
 import optuna
+from joblib import Parallel, delayed
 from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 
 # Load dataset
 df = pd.read_csv('../data/train.csv')
@@ -30,8 +32,18 @@ def process_df(df0: pd.DataFrame) -> pd.DataFrame:
     group_sizes = df0.groupby('GroupID')['PassengerId'].count().reset_index()
     group_sizes.rename(columns={'PassengerId': 'GroupSize'}, inplace=True)
     df0 = df0.merge(group_sizes, on='GroupID', how='left')
+
+    drop_cols = [
+        'PassengerId',  # ID column
+        'Name',         # Too unique
+        'Cabin_Num',    # Redundant after processing? Optional
+        'FoodCourt',    # Weak correlation
+        'ShoppingMall', # Weak correlation
+    ]
+    df0.drop(columns=drop_cols, inplace=True, errors='ignore')
     
-    return df0
+    return df0 
+
 
 df = process_df(df)
 test = process_df(test)
@@ -39,28 +51,51 @@ test = process_df(test)
 # Split dataset into train and validation
 train_df, valid_df = train_test_split(df, test_size=0.2, random_state=42)
 
-def objective(trial):
-    num_trees = trial.suggest_int("num_trees", 100, 1000)
-    max_depth = trial.suggest_int("max_depth", 5, 30)
-    min_examples = trial.suggest_int("min_examples", 2, 10)
-    categorical_algorithm = trial.suggest_categorical("categorical_algorithm", ["CART", "ONE_HOT", "RANDOM"])
-    growing_strategy = trial.suggest_categorical("growing_strategy", ["BEST_FIRST_GLOBAL","LOCAL"])
-    
-    model = ydf.RandomForestLearner(
-        label="Transported",
-        num_trees=num_trees,
-        max_depth=max_depth,
-        min_examples=min_examples,
-        categorical_algorithm=categorical_algorithm,
-        growing_strategy=growing_strategy
-    ).train(train_df)
-    
+def train_and_evaluate_fold(train_idx, valid_idx, df, params):
+    # Split data into train and validation sets
+    train_df, valid_df = df.iloc[train_idx], df.iloc[valid_idx]
+
+    # Train the model with the current fold's training set
+    model = ydf.RandomForestLearner(**params).train(train_df)
+
+    # Evaluate the model with the current fold's validation set
     evaluation = model.evaluate(valid_df)
-    return evaluation.accuracy  # Optuna will maximize this
+    return evaluation.accuracy
+
+def objective(trial):   
+    params = {
+        "label": "Transported",
+        "num_trees": trial.suggest_int("num_trees", 500, 1500),
+        "max_depth": trial.suggest_int("max_depth", 5, 64),
+        "min_examples": trial.suggest_int("min_examples", 2, 50),
+        "categorical_algorithm": trial.suggest_categorical("categorical_algorithm", ["CART", "ONE_HOT", "RANDOM"]),
+        "growing_strategy": trial.suggest_categorical("growing_strategy", ["BEST_FIRST_GLOBAL","LOCAL"]),
+        "winner_take_all": trial.suggest_categorical("winner_take_all", [True]),
+        "split_axis": trial.suggest_categorical("split_axis", ["SPARSE_OBLIQUE"]),
+        "sparse_oblique_weights": trial.suggest_categorical("sparse_oblique_weights", ["BINARY","CONTINUOUS"]),
+        "sparse_oblique_normalization": trial.suggest_categorical("sparse_oblique_normalization", ["NONE", "STANDARD_DEVIATION", "MIN_MAX"]),
+        "sparse_oblique_num_projections_exponent": trial.suggest_float("sparse_oblique_num_projections_exponent", 0.25,2),
+        "num_candidate_attributes_ratio": trial.suggest_float("num_candidate_attributes_ratio", 0.01, 1.0),   
+        "compute_oob_performances": trial.suggest_categorical("compute_oob_performances", [False]),
+    }
+
+    # Initialize StratifiedKFold cross-validation
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    # Initialize a list to store fold accuracies
+    fold_accuracies = []
+
+    # Manually execute each fold and append results
+    for train_idx, valid_idx in skf.split(df, df['Transported']):
+        accuracy = train_and_evaluate_fold(train_idx, valid_idx, df, params)
+        fold_accuracies.append(accuracy)
+
+    # Return the average accuracy across all K folds
+    return sum(fold_accuracies) / len(fold_accuracies)
 
 # Run Optuna hyperparameter tuning
 study = optuna.create_study(storage="sqlite:///study.db", direction="maximize", load_if_exists=True)
-study.optimize(objective, n_trials=50, n_jobs=6)
+study.optimize(objective, n_trials=100, n_jobs=12)
 
 # Best hyperparameters
 best_params = study.best_params
@@ -73,3 +108,28 @@ best_model.predict(test)
 
 evaluation = best_model.evaluate(df)
 print(f"Final test accuracy: {evaluation.accuracy}")
+
+# # Predict on test set
+# predictions = best_model.predict(test)
+
+# # Convert predictions to True/False
+# predicted_labels = predictions.to_numpy().astype(bool)
+
+# # Load the sample submission to get the correct order and format
+# sample_submission = pd.read_csv('/mnt/data/sample_submission(1).csv')
+
+# # Ensure the IDs match and build the final submission DataFrame
+# submission = pd.DataFrame({
+#     "PassengerId": test["PassengerId"],
+#     "Transported": predicted_labels
+# })
+
+# # Sort to match the sample submission order if needed
+# submission = submission.set_index("PassengerId").loc[sample_submission["PassengerId"]].reset_index()
+
+# # Save to CSV
+# submission.to_csv("my_submission.csv", index=False)
+
+# print("Submission file 'my_submission.csv' created!")
+
+
