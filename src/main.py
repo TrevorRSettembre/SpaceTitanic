@@ -1,6 +1,8 @@
 import ydf
 import pandas as pd
 import optuna
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
 from joblib import Parallel, delayed
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import StratifiedKFold
@@ -76,26 +78,40 @@ def objective(trial):
         "sparse_oblique_normalization": trial.suggest_categorical("sparse_oblique_normalization", ["NONE", "STANDARD_DEVIATION", "MIN_MAX"]),
         "sparse_oblique_num_projections_exponent": trial.suggest_float("sparse_oblique_num_projections_exponent", 0.25,2),
         "num_candidate_attributes_ratio": trial.suggest_float("num_candidate_attributes_ratio", 0.01, 1.0),   
-        "compute_oob_performances": trial.suggest_categorical("compute_oob_performances", [False]),
+        "compute_oob_performances": trial.suggest_categorical("compute_oob_performances", [True]),
     }
 
     # Initialize StratifiedKFold cross-validation
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    # Initialize a list to store fold accuracies
-    fold_accuracies = []
-
-    # Manually execute each fold and append results
-    for train_idx, valid_idx in skf.split(df, df['Transported']):
-        accuracy = train_and_evaluate_fold(train_idx, valid_idx, df, params)
-        fold_accuracies.append(accuracy)
+    fold_accuracies = Parallel(n_jobs=12)(
+    delayed(train_and_evaluate_fold)(train_idx, valid_idx, df, params)
+    for train_idx, valid_idx in skf.split(df, df['Transported'])
+    )
 
     # Return the average accuracy across all K folds
     return sum(fold_accuracies) / len(fold_accuracies)
 
-# Run Optuna hyperparameter tuning
-study = optuna.create_study(storage="sqlite:///study.db", direction="maximize", load_if_exists=True)
-study.optimize(objective, n_trials=100, n_jobs=12)
+sampler = TPESampler(
+    n_startup_trials=15,  # More random trials to explore the space initially
+    seed=42               # Ensuring reproducibility
+)
+
+# Add pruner to stop underperforming trials early
+pruner = MedianPruner(
+    n_startup_trials=10,   # Number of trials to run before pruning starts
+    n_warmup_steps=5       # Give the model a few trials to stabilize before pruning
+)
+
+# Create the study with pruner integrated
+study = optuna.create_study(
+    direction="maximize",
+    sampler=sampler,
+    pruner=pruner,  # This is where the pruner gets added
+    storage="sqlite:///study.db",  # Database for storing study results
+    load_if_exists=True
+)
+study.optimize(objective, n_trials=25, n_jobs=12)
 
 # Best hyperparameters
 best_params = study.best_params
