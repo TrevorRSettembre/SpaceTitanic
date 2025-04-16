@@ -1,13 +1,15 @@
-import ydf
 import pandas as pd
 import optuna
-import matplotlib.pyplot as plt
 from optuna.pruners import MedianPruner
 from optuna.samplers import TPESampler
-from joblib import Parallel, delayed
-from sklearn.model_selection import train_test_split
-from sklearn.model_selection import StratifiedGroupKFold
-
+from optuna.pruners import HyperbandPruner
+import ydf
+from joblib import Parallel, delayed, parallel_backend
+from sklearn.model_selection import train_test_split, StratifiedGroupKFold
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score
+import numpy as np
+import matplotlib.pyplot as plt
 
 df = pd.read_csv('../data/train.csv')
 test = pd.read_csv('../data/test.csv')
@@ -18,14 +20,15 @@ def process_df(df0: pd.DataFrame) -> pd.DataFrame:
 
     # Boolean columns — fill NA with False and cast to bool
     for col in ['CryoSleep', 'VIP']:
-        df0[col] = df0[col].apply(lambda x: str(x).lower() == 'true' if pd.notnull(x) else False).astype(bool)
+        df0[col] = df0[col].astype(str).str.lower() == 'true'
+        df0[col] = df0[col].fillna(False)
 
     # Categorical columns — fill with 'Unknown'
     cat_default = {'HomePlanet': 'Unknown', 'Destination': 'Unknown', 'Name': 'Unknown'}
     df0.fillna(cat_default, inplace=True)
 
       # Age — fill with median and bucket
-    df0['Age'] = df0['Age'].fillna(df['Age'].median())
+    df0['Age'] = df0['Age'].fillna(df0['Age'].median())
     df0['AgeBucket'] = pd.cut(df0['Age'], bins=[0, 12, 18, 35, 60, 100], labels=['Child', 'Teen', 'YoungAdult', 'Adult', 'Senior'])
     
     # Encode 'AgeBucket' as numerical labels
@@ -84,63 +87,78 @@ def train_and_evaluate_fold(train_idx, valid_idx, df, params):
     evaluation = model.evaluate(valid_df)
     return evaluation.accuracy
 
-def objective(trial):       
+def objective(trial):   
     params = {
         "label": "Transported",
-        "num_trees": trial.suggest_int("num_trees", 100, 1000),
-        "max_depth": trial.suggest_int("max_depth", 4, 16),
-        "shrinkage": trial.suggest_float("shrinkage", 0.01, 0.3, log=True),
+        "random_seed": 42,
+        "num_trees": trial.suggest_int("num_trees", 300, 1000),
+        "max_depth": trial.suggest_int("max_depth", 4, 32),
+        "shrinkage": trial.suggest_float("shrinkage", 0.001, 0.3, log=True),
         "min_examples": trial.suggest_int("min_examples", 2, 20),
-        "categorical_algorithm": trial.suggest_categorical("categorical_algorithm", ["CART", "RANDOM", "ONE_HOT"]),
-        "split_axis": trial.suggest_categorical("split_axis", ["AXIS_ALIGNED", "SPARSE_OBLIQUE"]),
-        "growing_strategy": "BEST_FIRST_GLOBAL",
-        "sampling_method": trial.suggest_categorical("sampling_method", ["NONE", "RANDOM"]),
+        "split_axis": "AXIS_ALIGNED",
+        "categorical_algorithm":trial.suggest_categorical("categorical_algorithm", ["CART", "RANDOM"]),
+        "growing_strategy": trial.suggest_categorical("growing_strategy", ["LOCAL", "BEST_FIRST_GLOBAL"]),
+        "sampling_method": "SELGB",
+        "selective_gradient_boosting_ratio": trial.suggest_float("selective_gradient_boosting_ratio", 0.01, 0.5),
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-       # "l2_regularization": trial.suggest_float("l2_regularization", 0.0, 5.0),
-       # "loss": trial.suggest_categorical("loss", ["DEFAULT", "BINOMIAL_LOG_LIKELIHOOD", "BINARY_FOCAL_LOSS"]),
+        "use_hessian_gain": True,  
+          
     }
     
-    sgkf = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
-    fold_accuracies = Parallel(n_jobs=4)(
-        delayed(train_and_evaluate_fold)(train_idx, valid_idx, df, params)
-        for train_idx, valid_idx in sgkf.split(df, df['Transported'], groups=df['GroupID'])
-    )
+    sgkf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+    fold_accuracies = [
+        train_and_evaluate_fold(train_idx, valid_idx, df, params)
+        for train_idx, valid_idx in sgkf.split(df, df['Transported'])
+    ] 
 
     return sum(fold_accuracies) / len(fold_accuracies)
 
-study = optuna.create_study(storage="sqlite:///study.db", direction="maximize", load_if_exists=True)
-study.optimize(objective, n_trials=25, n_jobs=4)
+
+# Create a study with pruning enabled
+study = optuna.create_study(
+    storage="sqlite:///study.db",
+    direction="maximize",
+    pruner=HyperbandPruner(),
+    sampler=TPESampler(),
+    load_if_exists=True
+)
+
+#study = optuna.create_study(storage="sqlite:///study.db", direction="maximize", load_if_exists=True)
+study.optimize(objective, n_trials=2, n_jobs=12)
 
 best_params = study.best_params
 print("\n\nBest hyperparameters:", best_params)
 
 # Evaluate final best model on hold-out validation
-best_model = ydf.RandomForestLearner(label="Transported",**best_params).train(train_df)
+# best_model = ydf.GradientBoostedTreesLearner(label="Transported",**best_params).train(train_df)
+templates = ydf.GradientBoostedTreesLearner.hyperparameter_templates()
+print(templates)
+best_model = ydf.GradientBoostedTreesLearner(label="Transported",**templates["benchmark_rank1@1"]).train(train_df)
 final_eval = best_model.evaluate(final_valid_df)
 print(f"Final hold-out validation accuracy: {final_eval.accuracy}")
 
-# (Optional) Retrain on full dataset for final submission
-final_model = ydf.RandomForestLearner(label="Transported",**best_params).train(df)
-final_model.describe()
+valid_probs = best_model.predict(final_valid_df)
+true_labels = final_valid_df["Transported"]
 
-# Predict on actual test data (Kaggle submission)
-predictions = final_model.predict(test)
+thresholds = np.linspace(0.0, 1.0, 101)
+best_thresh = 0.5
+best_acc = 0
 
-# Optional: Evaluate on full training set (for curiosity only)
-train_eval = final_model.evaluate(df)
-print(f"Training set accuracy (for reference): {train_eval.accuracy}")
+for t in thresholds:
+    preds = valid_probs > t
+    acc = accuracy_score(true_labels, preds)
+    if acc > best_acc:
+        best_acc = acc
+        best_thresh = t
 
-# Convert YDF predictions to a list of booleans
-n_predictions = [pred >= 0.5 for pred in predictions]
+print(f"✅ Best threshold: {best_thresh:.3f} with accuracy: {best_acc:.4f}")
 
 # Load the sample submission template
 sample_submission_df = pd.read_csv('../data/sample_submission.csv')
 
-# Assign your predictions
-sample_submission_df['Transported'] = n_predictions
+test_probs = best_model.predict(test)
+sample_submission_df['Transported'] = test_probs > best_thresh
 
-# Save to CSV
-sample_submission_df.to_csv('../ouput/submission.csv', index=False)
+sample_submission_df.to_csv('../output/submission.csv', index=False)
 
-# Display a preview
-print(sample_submission_df.head())
