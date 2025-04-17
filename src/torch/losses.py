@@ -1,3 +1,7 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: this file creates a pytorh compatible loss fuction 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

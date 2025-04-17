@@ -1,3 +1,7 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: This file is used to house and create the neural net
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

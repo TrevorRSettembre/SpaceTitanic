@@ -1,3 +1,8 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: This file is used to process and return the datasets.
+#
+
 import pandas as pd
 import numpy as np
 import torch

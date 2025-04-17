@@ -1,3 +1,7 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: This file is the main program file that handels the model training and output of the submission
+
 
 import torch
 import torch.nn as nn

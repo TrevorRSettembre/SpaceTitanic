@@ -1,3 +1,8 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: This file allows the model to use early stopping to stop any unproductive training
+
+
 import torch
 
 class MultiMetricEarlyStopping:

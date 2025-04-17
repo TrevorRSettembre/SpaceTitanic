@@ -1,3 +1,9 @@
+# Author: Trevor Settembre
+# Project Title: SpaceShip Titanic
+# Description: This file is used for code readability its purpose is to run the model on the full dataset after completing the kfolds
+
+
+
 import torch
 import torch.nn as nn
 import numpy as np
