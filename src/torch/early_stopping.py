@@ -63,21 +63,26 @@ class MultiMetricEarlyStopping:
         if improved:
             for m in self.monitor_metrics:
                 if improvements[m]:
-                    self.best_metrics[m] = current_metrics[m]
+                    old_val = self.best_metrics[m]
+                    new_val = current_metrics[m]
+                    self.best_metrics[m] = new_val
+                    if self.verbose:
+                        print(f"✅ {m} improved from {old_val:.4f} to {new_val:.4f}")
             self.counter = 0
             self.best_model_wts = model.state_dict()
             if self.path:
                 torch.save(model.state_dict(), self.path)
                 if self.verbose:
-                    print(f"Improvement in {improvements}. Saved model to {self.path}")
+                    print(f"💾 Saved model to {self.path}")
         else:
             self.counter += 1
             if self.verbose:
-                print(f"No improvement. Counter: {self.counter}/{self.patience}")
+                print(f"⏳ No improvement. Counter: {self.counter}/{self.patience}")
             if self.counter >= self.patience:
                 self.early_stop = True
                 if self.verbose:
-                    print("Early stopping triggered.")
+                    print("🛑 Early stopping triggered.")
+
 
     def load_best_model(self, model):
         if self.best_model_wts:
